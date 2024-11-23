@@ -14,12 +14,20 @@ const MAX_LINES = 100;
 // Add new type for search mode
 type SearchMode = 'filename' | 'content';
 
-const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
+// Add new prop type for search term
+const FilePreview: FC<{ filePath: string; searchTerm?: string }> = ({
+  filePath,
+  searchTerm,
+}) => {
   const [content, setContent] = useState<string>('');
+  const [matchingLineIndex, setMatchingLineIndex] = useState<number | null>(
+    null,
+  );
 
   useEffect(() => {
     let isMounted = true;
     const lines: string[] = [];
+    let firstMatchIndex: number | null = null;
 
     const readStream = createReadStream(filePath, { encoding: 'utf-8' });
     const rl = readline.createInterface({
@@ -27,11 +35,29 @@ const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
       crlfDelay: Infinity,
     });
 
+    let lineNumber = 0;
     rl.on('line', (line) => {
-      if (lines.length < MAX_LINES) {
+      // If we have a search term and haven't found a match yet, check this line
+      if (
+        searchTerm &&
+        firstMatchIndex === null &&
+        line.toLowerCase().includes(searchTerm.toLowerCase())
+      ) {
+        firstMatchIndex = lineNumber;
+      }
+
+      // Always keep track of line number
+      lineNumber++;
+
+      // Only store lines around the match if we have one
+      if (firstMatchIndex !== null) {
+        const contextLines = 20;
+        if (Math.abs(lineNumber - firstMatchIndex) <= contextLines) {
+          lines.push(line);
+        }
+      } else if (lines.length < MAX_LINES) {
+        // If no match yet, store up to MAX_LINES
         lines.push(line);
-      } else {
-        rl.close();
       }
     });
 
@@ -40,7 +66,7 @@ const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
 
       const fileContent = lines.join('\n');
       try {
-        const highlighted = highlight(fileContent, {
+        let highlighted = highlight(fileContent, {
           language: path.extname(filePath).slice(1),
           theme: {
             keyword: chalk.blue,
@@ -48,7 +74,17 @@ const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
             function: chalk.yellow,
           },
         });
+
+        // If we have a search term, add additional highlighting
+        if (searchTerm) {
+          const searchRegex = new RegExp(searchTerm, 'gi');
+          highlighted = highlighted.replace(searchRegex, (match) =>
+            chalk.bgYellow(match),
+          );
+        }
+
         setContent(highlighted + (lines.length >= MAX_LINES ? '\n...' : ''));
+        setMatchingLineIndex(firstMatchIndex);
       } catch (err) {
         console.log('❌ Error highlighting:', err);
         setContent(fileContent + (lines.length >= MAX_LINES ? '\n...' : ''));
@@ -66,7 +102,36 @@ const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
       rl.close();
       readStream.destroy();
     };
-  }, [filePath]);
+  }, [filePath, searchTerm]);
+
+  // Calculate visible content based on matching line
+  const getVisibleContent = (
+    fullContent: string,
+    matchIndex: number | null,
+  ): string => {
+    if (matchIndex === null) return fullContent;
+
+    const lines = fullContent.split('\n');
+    const visibleLines = 40;
+
+    // Ensure our line numbers are within bounds
+    const safeMatchIndex = Math.min(matchIndex, lines.length - 1);
+
+    // Calculate window around match
+    const startLine = Math.max(
+      0,
+      safeMatchIndex - Math.floor(visibleLines / 2),
+    );
+    const endLine = Math.min(lines.length, startLine + visibleLines);
+
+    const visibleContent = lines.slice(startLine, endLine).join('\n');
+
+    // Only add ellipsis if we're actually truncating
+    const prefix = startLine > 0 ? '...\n' : '';
+    const suffix = endLine < lines.length ? '\n...' : '';
+
+    return prefix + visibleContent + suffix;
+  };
 
   return (
     <Box
@@ -76,7 +141,14 @@ const FilePreview: FC<{ filePath: string }> = ({ filePath }) => {
       overflowY="hidden"
       flexDirection="column"
     >
-      <Text>{content}</Text>
+      <Text>
+        {matchingLineIndex !== null && (
+          <Text dimColor>{`Match found on line ${
+            matchingLineIndex + 1
+          }\n`}</Text>
+        )}
+        {getVisibleContent(content, matchingLineIndex)}
+      </Text>
     </Box>
   );
 };
@@ -87,7 +159,7 @@ const App: FC = () => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [matchingFiles, setMatchingFiles] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [searchMode, setSearchMode] = useState<SearchMode>('filename');
+  const [searchMode, setSearchMode] = useState<SearchMode>('content');
   const [isFocused, setIsFocused] = useState(true);
 
   useInput((input, key) => {
@@ -192,6 +264,11 @@ const App: FC = () => {
     }
   };
 
+  const keybindingHint =
+    searchMode === 'content'
+      ? 'Ctrl+N for filename search'
+      : 'Ctrl+F for content search';
+
   return (
     <Box flexDirection="column" height="100%">
       <Box flexDirection="row" flexGrow={1} height="100%">
@@ -222,7 +299,12 @@ const App: FC = () => {
           overflowY="hidden"
           padding={1}
         >
-          {selectedFile && <FilePreview filePath={selectedFile} />}
+          {selectedFile && (
+            <FilePreview
+              filePath={selectedFile}
+              searchTerm={searchMode === 'content' ? query : undefined}
+            />
+          )}
         </Box>
       </Box>
       <Box
@@ -243,10 +325,11 @@ const App: FC = () => {
               onChange={handleInput}
               focus={isFocused}
               onSubmit={() => setIsFocused(false)}
+              placeholder="Search file contents..."
             />
           </Box>
           <Text dimColor italic>
-            Press Ctrl+N for filename search, Ctrl+F for content search
+            {keybindingHint}
           </Text>
         </Box>
       </Box>
